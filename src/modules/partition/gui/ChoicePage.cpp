@@ -1253,9 +1253,13 @@ ChoicePage::setupEfiSystemPartitionSelector()
 
         if ( !PartUtils::isEfiFilesystemRecommendedSize( efiPartition ) )
         {
-            qint64 requiredMiB = Calamares::BytesToMiB( PartUtils::efiFilesystemRecommendedSize() );
+            qint64 requiredMiB = PartUtils::isEfiFilesystemClusterBased()
+                ? PartUtils::efiFilesystemMinimumSizeMiB( efiPartition )
+                : Calamares::BytesToMiB( PartUtils::efiFilesystemRecommendedSize() );
             text += QStringLiteral( "<br/><font color=\"red\">" )
-                    + tr( "The EFI system partition is too small (recommended %1 MiB), please use manual partition." ).arg( requiredMiB )
+                    + ( PartUtils::isEfiFilesystemClusterBased()
+                        ? tr( "The FAT32 EFI system partition must be at least %1 MiB in size. Please use manual partitioning." ).arg( requiredMiB )
+                        : tr( "The EFI system partition is too small (recommended %1 MiB), please use manual partition." ).arg( requiredMiB ) )
                     + QStringLiteral( "</font>" );
         }
         m_efiLabel->setText( text );
@@ -1272,9 +1276,13 @@ ChoicePage::setupEfiSystemPartitionSelector()
                 QString text = tr( "EFI system partition:", "@label" );
                 if ( !PartUtils::isEfiFilesystemRecommendedSize( efiPartition ) )
                 {
-                    qint64 requiredMiB = Calamares::BytesToMiB( PartUtils::efiFilesystemRecommendedSize() );
+                    qint64 requiredMiB = PartUtils::isEfiFilesystemClusterBased()
+                        ? PartUtils::efiFilesystemMinimumSizeMiB( efiPartition )
+                        : Calamares::BytesToMiB( PartUtils::efiFilesystemRecommendedSize() );
                     text += QStringLiteral( "<br/><font color=\"red\">" )
-                            + tr( "The EFI system partition is too small (recommended %1 MiB), please use manual partition." ).arg( requiredMiB )
+                            + ( PartUtils::isEfiFilesystemClusterBased()
+                                ? tr( "The FAT32 EFI system partition must be at least %1 MiB in size. Please use manual partitioning." ).arg( requiredMiB )
+                                : tr( "The EFI system partition is too small (recommended %1 MiB), please use manual partition." ).arg( requiredMiB ) )
                             + QStringLiteral( "</font>" );
                 }
                 m_efiLabel->setText( text );
@@ -1601,7 +1609,14 @@ ChoicePage::calculateNextEnabled() const
         if ( efiPartition && !PartUtils::isEfiFilesystemRecommendedSize( efiPartition ) )
         {
             qint64 requiredMiB = Calamares::BytesToMiB( PartUtils::efiFilesystemRecommendedSize() );
-            cDebug() << "Selected EFI partition is too small (recommended" << requiredMiB << "MiB)";
+            if ( PartUtils::isEfiFilesystemClusterBased() )
+            {
+                cDebug() << "Selected EFI partition must contain at least 65,527 FAT32 data clusters";
+            }
+            else
+            {
+                cDebug() << "Selected EFI partition is too small (recommended" << requiredMiB << "MiB)";
+            }
             return false;
         }
     }

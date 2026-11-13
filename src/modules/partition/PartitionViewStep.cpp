@@ -16,6 +16,7 @@
 #include "Config.h"
 #include "core/BootLoaderModel.h"
 #include "core/DeviceModel.h"
+#include "core/Fat32.h"
 #include "core/PartitionCoreModule.h"
 #include "core/PartitionInfo.h"
 #include "gui/ChoicePage.h"
@@ -745,11 +746,21 @@ PartitionViewStep::onLeave()
 
             Logger::Once o;
 
+            const bool clusterBased = PartUtils::isEfiFilesystemClusterBased();
+            const auto clusters = clusterBased ? PartUtils::efiFilesystemClusterCount( esp ) : -1;
             const bool okType = esp && PartUtils::isEfiFilesystemSuitableType( esp );
-            const bool okRecommendedSize = esp && PartUtils::isEfiFilesystemRecommendedSize( esp );
-            const bool okMinimumSize = esp && PartUtils::isEfiFilesystemMinimumSize( esp );
+            const bool okMinimumSize = esp && ( clusterBased
+                ? clusters >= qint64( PartUtils::Fat32::minimumClusters )
+                : PartUtils::isEfiFilesystemMinimumSize( esp ) );
+            const bool okRecommendedSize = clusterBased
+                ? okMinimumSize
+                : esp && PartUtils::isEfiFilesystemRecommendedSize( esp );
             const bool okFlag = esp && PartUtils::isEfiBootable( esp );
-
+            const bool belowRecommendedClusters = clusterBased && PartUtils::Fat32::isBelowRecommendedMinimum( clusters );
+            const bool belowSpecificationClusters = clusterBased && esp
+                && ( PartUtils::Fat32::isBelowSpecificationMinimum( clusters )
+                     || esp->fileSystem().type() == FileSystem::Type::Fat12
+                     || esp->fileSystem().type() == FileSystem::Type::Fat16 );
             const bool espExistsButIsWrong = esp && !( okType && okMinimumSize && okFlag );
 
             const QString genericWrongnessMessage = tr( "An EFI system partition is necessary to start %1."
@@ -771,8 +782,13 @@ PartitionViewStep::onLeave()
             const QString wrongFlagMessage = tr( "The filesystem must have flag <strong>%1</strong> set." )
                                                  .arg( PartitionTable::flagName( PartitionTable::Flag::Boot ) );
 
-            const auto recommendedMiB = Calamares::BytesToMiB( PartUtils::efiFilesystemRecommendedSize() );
-            const auto minimumMiB = Calamares::BytesToMiB( PartUtils::efiFilesystemMinimumSize() );
+            const auto* deviceModel = m_core->deviceModel();
+            const auto* device = deviceModel->deviceForIndex(
+                deviceModel->index( m_manualPartitionPage->selectedDeviceIndex(), 0 ) );
+            const auto minimumMiB = PartUtils::efiFilesystemMinimumSizeMiB( esp, device ? device->logicalSize() : 512 );
+            const auto recommendedMiB = PartUtils::isEfiFilesystemClusterBased()
+                ? minimumMiB
+                : Calamares::BytesToMiB( PartUtils::efiFilesystemRecommendedSize() );
 
             // Three flavors of size-is-wrong
             const QString requireConfiguredSize
@@ -798,23 +814,46 @@ PartitionViewStep::onLeave()
             }
             else if ( espExistsButIsWrong )
             {
-                message = tr( "EFI system partition configured incorrectly" );
+                message = belowSpecificationClusters
+                    ? tr( "EFI system partition is not UEFI compliant" )
+                    : tr( "EFI system partition configured incorrectly" );
 
                 description = genericWrongnessMessage + startList;
-                if ( !okMinimumSize )
+                if ( belowSpecificationClusters )
                 {
-                    description.append( listItem( requiredMinimumSize ) );
+                    description.append( listItem( tr(
+                        "Continuing with this filesystem does not comply with the UEFI specification, "
+                        "which requires FAT32 for an EFI system partition. By its data cluster count, "
+                        "the selected filesystem is FAT12 or FAT16, even if it is labelled FAT32. "
+                        "Select or create a FAT32 filesystem of at least %1 MiB." ).arg( minimumMiB ) ) );
                 }
-                if ( !okType )
+                if ( !okMinimumSize && ( !clusterBased || belowRecommendedClusters ) )
+                {
+                    description.append( listItem( belowRecommendedClusters ? suggestConfiguredSize : requiredMinimumSize ) );
+                }
+                if ( !okType && !belowSpecificationClusters )
                 {
                     description.append( listItem( wrongTypeMessage ) );
+                }
+                if ( clusterBased && !okMinimumSize && clusters < 0 && !belowSpecificationClusters && okType )
+                {
+                    description.append( listItem( tr( "The FAT32 filesystem could not be verified. "
+                        "Select or create a valid FAT32 filesystem before continuing." ) ) );
                 }
                 if ( !okFlag )
                 {
                     description.append( listItem( wrongFlagMessage ) );
                 }
                 description.append( endList );
-                description.append( mayFail );
+                if ( belowRecommendedClusters && okType && okFlag )
+                {
+                    description.append( tr( "If you know your firmware supports this FAT32 filesystem, "
+                                            "you can safely continue with this size." ) );
+                }
+                else
+                {
+                    description.append( mayFail );
+                }
             }
             else if ( !okRecommendedSize )
             {

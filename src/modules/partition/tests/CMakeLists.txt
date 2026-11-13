@@ -78,3 +78,8 @@ calamares_add_test(
     DEFINITIONS
         ${_partition_defs}
 )
+
+calamares_add_test(
+    partitionfat32test
+    SOURCES Fat32Tests.cpp
+)

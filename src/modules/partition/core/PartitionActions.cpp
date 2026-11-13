@@ -176,7 +176,11 @@ doAutopartition( PartitionCoreModule* core, Device* dev, Choices::AutoPartitionO
 
     if ( isEfi || bootloader == "limine")
     {
-        qint64 uefisys_part_sizeB = PartUtils::efiFilesystemRecommendedSize();
+        // GRUB keeps kernels on the root filesystem. Size its ESP from the
+        // FAT32 cluster minimum, including metadata and MiB alignment.
+        qint64 uefisys_part_sizeB = PartUtils::isEfiFilesystemClusterBased()
+            ? PartUtils::efiFilesystemMinimumSizeMiB( nullptr, dev->logicalSize() ) * 1_MiB
+            : PartUtils::efiFilesystemRecommendedSize();
         qint64 efiSectorCount = Calamares::bytesToSectors( uefisys_part_sizeB, dev->logicalSize() );
         Q_ASSERT( efiSectorCount > 0 );
 

@@ -12,6 +12,7 @@
 #include "PartUtils.h"
 
 #include "core/DeviceModel.h"
+#include "core/Fat32.h"
 #include "core/KPMHelpers.h"
 #include "core/PartitionInfo.h"
 
@@ -29,6 +30,7 @@
 #include <kpmcore/core/device.h>
 #include <kpmcore/core/partition.h>
 
+#include <QFile>
 #include <QProcess>
 #include <QTemporaryDir>
 
@@ -468,8 +470,113 @@ isEfiFilesystemSuitableType( const Partition* candidate )
 }
 
 bool
+isEfiFilesystemClusterBased()
+{
+    const auto* gs = Calamares::JobQueue::instance()->globalStorage();
+    return gs->value( "packagechooser_bootloader" ).toString() == QLatin1String( "grub" )
+        && gs->value( "efiSystemPartition" ).toString() == QLatin1String( "/boot/efi" );
+}
+
+qint64
+efiFilesystemMinimumSizeMiB( const Partition* candidate, qint64 logicalSectorSize )
+{
+    if ( !isEfiFilesystemClusterBased() )
+    {
+        return ( efiFilesystemMinimumSize() + 1_MiB - 1 ) / 1_MiB;
+    }
+
+    const auto sectorSize = candidate ? candidate->sectorSize() : logicalSectorSize;
+    auto minimum = Fat32::minimumVolumeSize( sectorSize );
+    if ( candidate && !isPartitionNew( candidate ) && !PartitionInfo::format( candidate ) )
+    {
+        QFile device( candidate->partitionPath() );
+        if ( device.open( QIODevice::ReadOnly ) )
+        {
+            const auto boot = device.read( 512 );
+            const auto* data = reinterpret_cast< const unsigned char* >( boot.constData() );
+            if ( Fat32::clusterCount( data, boot.size(), candidate->capacity() ) )
+            {
+                const auto word = [ data ]( int offset ) -> quint64
+                { return data[offset] | ( quint64( data[offset + 1] ) << 8 ); };
+                const auto dword = [ &word ]( int offset ) { return word( offset ) | ( word( offset + 2 ) << 16 ); };
+                const auto bytesPerSector = word( 11 );
+                const auto fatSectors = std::max< quint64 >(
+                    dword( 36 ), ( ( Fat32::minimumClusters + 2 ) * 4 + bytesPerSector - 1 ) / bytesPerSector );
+                minimum = ( word( 14 ) + data[16] * fatSectors + Fat32::minimumClusters * data[13] )
+                    * bytesPerSector;
+            }
+        }
+    }
+    return ( minimum + 1_MiB - 1 ) / 1_MiB;
+}
+
+qint64
+efiFilesystemClusterCount( const Partition* candidate )
+{
+    if ( !candidate || candidate->capacity() <= 0 || !isEfiFilesystemSuitableType( candidate ) )
+    {
+        return -1;
+    }
+    if ( isPartitionNew( candidate ) || PartitionInfo::format( candidate ) )
+    {
+        // Small mkfs.fat FAT32 volumes use one sector per cluster, two FATs
+        // and 32 reserved sectors. Recalculate after rounding FAT lengths.
+        const quint64 sectorSize = candidate->sectorSize();
+        if ( !Fat32::minimumVolumeSize( sectorSize ) || candidate->capacity() / sectorSize <= 32 )
+        {
+            return -1;
+        }
+        const quint64 fatAndDataSectors = candidate->capacity() / sectorSize - 32;
+        const auto clusters = ( fatAndDataSectors * sectorSize + 16 ) / ( sectorSize + 8 );
+        const auto fatSectors = ( ( clusters + 2 ) * 4 + sectorSize - 1 ) / sectorSize;
+        return fatAndDataSectors > 2 * fatSectors ? qint64( fatAndDataSectors - 2 * fatSectors ) : 0;
+    }
+    QFile device( candidate->partitionPath() );
+    if ( !device.open( QIODevice::ReadOnly ) )
+    {
+        return -1;
+    }
+    const auto boot = device.read( 512 );
+    const auto clusters = Fat32::clusterCount( reinterpret_cast< const unsigned char* >( boot.constData() ),
+                                              boot.size(), candidate->capacity() );
+    return clusters ? qint64( clusters ) : -1;
+}
+
+static bool
+hasMinimumEfiClusters( const Partition* candidate )
+{
+    if ( !isEfiFilesystemSuitableType( candidate ) || candidate->capacity() <= 0 )
+    {
+        return false;
+    }
+    if ( isPartitionNew( candidate ) || PartitionInfo::format( candidate ) )
+    {
+        const auto minimum = Fat32::minimumVolumeSize( candidate->sectorSize() );
+        // Leave room for mkfs.fat geometry rounding as well as FAT metadata.
+        const auto alignedMinimum = ( minimum + 1_MiB - 1 ) / 1_MiB * 1_MiB;
+        return minimum && quint64( candidate->capacity() ) >= alignedMinimum;
+    }
+
+    QFile device( candidate->partitionPath() );
+    if ( !device.open( QIODevice::ReadOnly ) )
+    {
+        cWarning() << "Cannot read FAT32 cluster count for" << candidate->partitionPath();
+        return false;
+    }
+    const auto boot = device.read( 512 );
+    return Fat32::clusterCount( reinterpret_cast< const unsigned char* >( boot.constData() ),
+                                boot.size(),
+                                candidate->capacity() ) >= Fat32::minimumClusters;
+}
+
+bool
 isEfiFilesystemRecommendedSize( const Partition* candidate )
 {
+    if ( isEfiFilesystemClusterBased() )
+    {
+        return hasMinimumEfiClusters( candidate );
+    }
+
     auto size = candidate->capacity();  // bytes
     if ( size <= 0 )
     {
@@ -490,6 +597,11 @@ isEfiFilesystemRecommendedSize( const Partition* candidate )
 bool
 isEfiFilesystemMinimumSize( const Partition* candidate )
 {
+    if ( isEfiFilesystemClusterBased() )
+    {
+        return hasMinimumEfiClusters( candidate );
+    }
+
     using Calamares::Units::operator""_MiB;
 
     auto size = candidate->capacity();  // bytes

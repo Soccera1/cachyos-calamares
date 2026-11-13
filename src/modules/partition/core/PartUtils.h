@@ -95,13 +95,24 @@ bool isEfiFilesystemSuitableType( const Partition* candidate );
 
 /**
  * @brief Is the @p partition suitable as an EFI boot partition?
- * Checks for filesystem size (300MiB, see efi.recommendedSize).
+ * Checks for filesystem size (300MiB, see efi.recommendedSize), or at least
+ * 65,527 FAT32 data clusters for GRUB with the ESP at /boot/efi.
  */
 bool isEfiFilesystemRecommendedSize( const Partition* candidate );
 
+/** @brief Does the selected GRUB layout keep kernels outside the ESP? */
+bool isEfiFilesystemClusterBased();
+
+/** @brief FAT32 data clusters, estimated for pending formats; -1 if unreadable or invalid. */
+qint64 efiFilesystemClusterCount( const Partition* candidate );
+
+/** @brief Minimum EFI size for display, rounded up to MiB, using the FAT geometry when available. */
+qint64 efiFilesystemMinimumSizeMiB( const Partition* candidate, qint64 logicalSectorSize = 512 );
+
 /**
  * @brief Is the @p candidate suitable as an EFI boot partition?
- * Checks for filesystem size (32MiB at least, see efi.minimumSize).
+ * Checks for filesystem size (32MiB at least, see efi.minimumSize), or the
+ * FAT32 cluster minimum for GRUB with the ESP at /boot/efi.
  */
 bool isEfiFilesystemMinimumSize( const Partition* candidate );
 
